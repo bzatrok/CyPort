@@ -31,6 +31,19 @@
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
 	<key>UIApplicationSupportsIndirectInputEvents</key><true/>
+	<!-- scene lifecycle: required by the iOS 26+ SDK stamp build.sh puts on the game binary (MSSceneDelegate in MacShim.m) -->
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key><false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array><dict>
+				<key>UISceneConfigurationName</key><string>Default</string>
+				<key>UISceneDelegateClassName</key><string>MSSceneDelegate</string>
+			</dict></array>
+		</dict>
+	</dict>
 	<key>GCSupportsControllerUserInteraction</key><true/>
 	<!-- Game Mode: iOS prioritises the game's CPU/GPU work and lowers Bluetooth controller latency -->
 	<key>GCSupportsGameMode</key><true/>

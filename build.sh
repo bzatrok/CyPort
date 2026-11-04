@@ -70,12 +70,15 @@ else
 fi
 rm -rf "$APP"/Frameworks/*.dSYM
 echo "==> 2/4 retarget game binary + libraries (macOS -> iOS load commands only)"
-python3 "$HERE/tools/ios_retarget.py" "$GAME_APP/Contents/MacOS/Cyberpunk2077" "$APP/Cyberpunk2077" >/dev/null
+# main binary only: iPadOS 26+ may show apps stamped with an older SDK in a compatibility window; IOS_SDK_VERSION=18.0 restores the old stamp
+SDKV="${IOS_SDK_VERSION:-$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo 18.0)}"
+python3 "$HERE/tools/ios_retarget.py" "$GAME_APP/Contents/MacOS/Cyberpunk2077" "$APP/Cyberpunk2077" --sdk "$SDKV" >/dev/null
 chmod +x "$APP/Cyberpunk2077"
 for f in "$GAME_APP"/Contents/Frameworks/*.dylib; do
-  python3 "$HERE/tools/ios_retarget.py" "$f" "$APP/Frameworks/$(basename "$f")" >/dev/null
+  python3 "$HERE/tools/ios_retarget.py" "$f" "$APP/Frameworks/$(basename "$f")" >/dev/null   # libraries keep 18.0: dyld rejects their old LINKEDIT layout under a 26+ stamp
 done
 sed "s/__BUNDLE_ID__/$BUNDLE_ID/" "$HERE/app/Info.plist" > "$APP/Info.plist"
+plutil -replace DTSDKName -string "iphoneos$SDKV" "$APP/Info.plist"; plutil -replace DTPlatformVersion -string "$SDKV" "$APP/Info.plist"
 # first-run graphics settings (everything at its lowest); the shim copies it when the game has no UserSettings.json yet
 [ -f "$HERE/app/DefaultUserSettings.json" ] && cp "$HERE/app/DefaultUserSettings.json" "$APP/DefaultUserSettings.json"
 # app icon (legacy CFBundleIconFiles PNGs, see Info.plist)
