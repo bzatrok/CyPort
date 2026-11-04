@@ -58,7 +58,7 @@ fi
 clang $LDFLAG -target arm64-apple-ios16.0 -isysroot "$SDK" -dynamiclib -fobjc-arc -O2 $SWIFT_LD \
   -install_name @rpath/libMacShim.dylib -compatibility_version 9999.0.0 -current_version 9999.0.0 \
   -framework Foundation -framework UIKit -framework GameController -framework QuartzCore \
-  -framework Security -framework CoreGraphics -framework CoreFoundation -framework Metal -framework UniformTypeIdentifiers -framework WebKit -lz \
+  -framework Security -framework CoreGraphics -framework CoreFoundation -framework Metal -framework AVFAudio -framework UniformTypeIdentifiers -framework WebKit -lz \
   -Wl,-reexport_framework,Foundation -Wl,-reexport_framework,CoreGraphics -Wl,-reexport_framework,Security -Wl,-reexport_framework,Metal \
   "$HERE/shim/MacShim.m" "$HERE/shim/MacShimC.c" "$HERE/shim/StoreCodecs.c" "$HERE/shim/third_party/lzma/LzmaDec.c" $SWIFT_OBJ \
   -o "$APP/Frameworks/libMacShim.dylib"

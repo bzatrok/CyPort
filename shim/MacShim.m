@@ -14,6 +14,7 @@
 #import <GameController/GameController.h>
 #import <QuartzCore/QuartzCore.h>
 #import <Metal/Metal.h>
+#import <AVFAudio/AVFAudio.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/message.h>
 #include <os/lock.h>
@@ -386,6 +387,7 @@ static _Atomic int g_galaxyFailures;
 - (void)msTouches:(NSSet<UITouch *> *)ts phase:(int)ph event:(UIEvent *)ev;
 @end
 static _Atomic int g_gcmCount;                   /* GameController mice connected (see MSAttachMouse) */
+static _Atomic double g_hoverAt;                 /* last iPadOS pointer position (menus follow it, see msHover) */
 @interface MSRootVC : UIViewController @end
 @implementation MSRootVC
 - (BOOL)prefersStatusBarHidden { return YES; }
@@ -475,7 +477,10 @@ static CGPoint MSTouchIn(UITouch *t, UIView *host) {
     return self;
 }
 - (void)layoutSubviews { [super layoutSubviews]; [self.owner msLayoutFromHost]; }
-- (UIPointerStyle *)pointerInteraction:(UIPointerInteraction *)i styleForRegion:(UIPointerRegion *)r { return g_cursorHidden ? [UIPointerStyle hiddenPointerStyle] : nil; }
+- (UIPointerStyle *)pointerInteraction:(UIPointerInteraction *)i styleForRegion:(UIPointerRegion *)r {
+    /* a GCMouse (iPad trackpad) moves the game's own cursor by raw motion; iPadOS's pointer would drift beside it */
+    return g_cursorHidden || g_gcmCount > 0 ? [UIPointerStyle hiddenPointerStyle] : nil;
+}
 
 - (NSEvent *)msEvent:(NSUInteger)type at:(CGPoint)p {
     NSEvent *e = [NSEvent new]; e.type = type; e.locationInWindow = MSToCocoa(p, self); e.modifierFlags = g_modFlags;
@@ -584,11 +589,11 @@ static void MSLeftPress(int by, BOOL down) {
     CGPoint p = [g locationInView:self];
     if (g_gcmCount) {                   /* a mouse is connected: raw motion moves the cursor; if none arrives (AssistiveTouch
                                            keeps it for its own pointer), follow that pointer instead */
-        if (CACurrentMediaTime() - g_gcmLastMoveAt < 1.0 || g_pointerLocked) return;
-        static CGPoint last; static BOOL have;
-        if (g.state == UIGestureRecognizerStateBegan || !have) { last = p; have = YES; }
-        CGPoint d = CGPointMake(p.x - last.x, p.y - last.y); last = p; g_gcmHovers++;
-        if (g.state == UIGestureRecognizerStateEnded) have = NO;
+        /* iPad menus: the cursor sits where iPadOS's pointer is. Raw GCMouse motion stops once that pointer reaches the
+           screen edge (unlocked), so the blue cursor got stuck short of it. Gameplay (locked) keeps raw motion. */
+        if (g_pointerLocked) return;
+        g_hoverAt = CACurrentMediaTime(); g_gcmHovers++;
+        CGPoint c = MSGCMouseAt(self), d = CGPointMake(p.x - c.x, p.y - c.y);
         if (d.x != 0 || d.y != 0) MSGCMouseMove(self, d);
         return;
     }
@@ -1044,6 +1049,8 @@ static BOOL MSCalledFromGameMain(void *ret);
 
 /* ---------------------------------------------------------------- keyboard -> NSEvent */
 static void MSKey(GCKeyCode code, BOOL pressed) {
+    /* the iPad Magic Keyboard has no Esc: the key left of 1 (` ~, or § on ISO layouts) acts as Esc */
+    if (code == GCKeyCodeGraveAccentAndTilde || code == GCKeyCodeNonUSBackslash) code = GCKeyCodeEscape;
     NSNumber *mk = MSKeyMap()[@((NSInteger)code)]; if (!mk) return; unsigned short mac = mk.unsignedShortValue;
     NSUInteger f = MSFlagForMac(mac); NSEvent *e = [NSEvent new]; e.keyCode = mac; e.timestamp = CACurrentMediaTime(); e.locationInWindow = g_mouse;
     if (f) { if (pressed) g_modFlags |= f; else g_modFlags &= ~f; e.type = MSFlagsChanged; }
@@ -1101,6 +1108,7 @@ static void MSGCMouseFlush(void) {
     g_gcmPending.x -= d.x; g_gcmPending.y -= d.y;
     os_unfair_lock_unlock(&g_gcmLock);
     if (d.x == 0 && d.y == 0) return;
+    if (!g_pointerLocked && now - g_hoverAt < 1.0) return;   /* menus on iPad: msHover places the cursor */
     if (g_pointerLocked) [h msMouseDelta:d]; else MSGCMouseMove(h, d);
 }
 static _Atomic long long g_gcmClicks; static _Atomic double g_gcmConnectAt;
@@ -4088,15 +4096,23 @@ static void MSStartReadProgress(void) {
                 }
                 int pf = g_paceFPS; NSString *fs = pf > 0 && g_paceT > 0 ? [NSString stringWithFormat:@"%.0f/%d FPS", fps, pf] : [NSString stringWithFormat:@"%.0f FPS", fps];
                 NSString *f = ov == 2 ? [NSString stringWithFormat:@"%@   %.1f ms   CPU %.0f%%   RAM %.2f GB   %s", fs, fps > 0.5 ? 1000 / fps : 0, cpuPct, mem / 1024, MSThermal()]
-                                      : [NSString stringWithFormat:@"%@  %.1f ms   RAM %.1f GB%@", fs, fps > 0.5 ? 1000 / fps : 0, mem / 1024,
-                                         NSProcessInfo.processInfo.thermalState >= NSProcessInfoThermalStateSerious ? @"   HOT" : @""];
-                CGFloat pw = ov == 2 ? 400 : 210;
+                                      : [NSString stringWithFormat:@"%@  %.1f ms   RAM %.1f GB", fs, fps > 0.5 ? 1000 / fps : 0, mem / 1024];
+                /* thermal state as the log names it, in a faint colour: green cool, yellow warm, orange HOT, red CRITICAL */
+                NSProcessInfoThermalState ts = NSProcessInfo.processInfo.thermalState;
+                NSArray *tc = @[ [UIColor colorWithRed:0.45 green:0.85 blue:0.5 alpha:0.6], [UIColor colorWithRed:0.95 green:0.85 blue:0.35 alpha:0.6],
+                                 [UIColor colorWithRed:1 green:0.6 blue:0.25 alpha:0.7], [UIColor colorWithRed:1 green:0.35 blue:0.35 alpha:0.75] ];
+                NSString *tname = ov == 2 ? @"" : [NSString stringWithFormat:@"   %s", MSThermal()];
+                UIFont *hf = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+                NSMutableAttributedString *as = [[NSMutableAttributedString alloc] initWithString:f attributes:@{ NSFontAttributeName: hf, NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.9] }];
+                [as appendAttributedString:[[NSAttributedString alloc] initWithString:tname attributes:@{ NSFontAttributeName: hf, NSForegroundColorAttributeName: tc[MIN((NSUInteger)ts, 3)] }]];
+                f = [f stringByAppendingString:tname];   /* for the width below */
+                CGFloat pw = MAX(ov == 2 ? 400 : 210, f.length * 7 + 28);   /* ~7 pt per 11 pt monospaced char: "61/60 FPS" no longer cuts off RAM */
                 [CATransaction begin]; [CATransaction setDisableActions:YES];
                 CGRect R = g_stRoot.bounds;
                 g_stBg.frame = CGRectMake(R.size.width / 2 - pw / 2, R.size.height - 24, pw, 20); g_stBg.cornerRadius = 10;
                 g_stBg.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45].CGColor;
                 g_stTitle.hidden = g_stLog.hidden = g_stTrack.hidden = YES;
-                g_stHead.frame = CGRectMake(10, 2, pw - 20, 16); g_stHead.alignmentMode = kCAAlignmentCenter; g_stHead.fontSize = 11; g_stHead.string = f;
+                g_stHead.frame = CGRectMake(10, 2, pw - 20, 16); g_stHead.alignmentMode = kCAAlignmentCenter; g_stHead.fontSize = 11; g_stHead.string = as;
                 [CATransaction commit]; [CATransaction flush];
                 continue;
             }
@@ -4499,7 +4515,14 @@ static void MSHookGameWindow(void) {
 static IMP g_origEngineStart;
 static BOOL ms_engineStart(id self, SEL _cmd, NSError **err) {
     @synchronized (g_audioEngines) { [g_audioEngines addObject:self]; }
-    return ((BOOL (*)(id, SEL, NSError **))g_origEngineStart)(self, _cmd, err);
+    static dispatch_once_t o; dispatch_once(&o, ^{     /* default session (SoloAmbient) is silenced by silent mode */
+        NSError *e = nil; AVAudioSession *as = AVAudioSession.sharedInstance;
+        BOOL ok = [as setCategory:AVAudioSessionCategoryPlayback error:&e] && [as setActive:YES error:&e];
+        MSLogf(@"audio: session playback %@ (route %@, volume %.2f)", ok ? @"on" : e, as.currentRoute.outputs.firstObject.portType, as.outputVolume);
+    });
+    BOOL r = ((BOOL (*)(id, SEL, NSError **))g_origEngineStart)(self, _cmd, err);
+    MSLogf(@"audio: engine start -> %d%@", r, r || !err ? @"" : [NSString stringWithFormat:@" (%@)", *err]);
+    return r;
 }
 static void MSInstallBackgroundFreeze(void) {
     g_audioEngines = [NSHashTable weakObjectsHashTable];
