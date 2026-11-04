@@ -650,6 +650,22 @@ static void MSLeftPress(int by, BOOL down) {
 - (BOOL)canBecomeKeyView { return YES; } - (BOOL)mouseDownCanMoveWindow { return NO; } - (BOOL)isFlipped { return NO; }
 @end
 
+/* ---------------------------------------------------------------- AppKit widgets the 2.5.0 build links (Steam copy).
+ * Never shown on iOS: MSBase logs each selector the game sends and returns 0. Parents follow AppKit, because the game
+ * subclasses NSButton and NSScroller. shortcut: no drawing or behaviour, implement if the log shows they matter. */
+@interface NSControl : NSView @end      @implementation NSControl @end
+@interface NSButton : NSControl @end    @implementation NSButton @end
+@interface NSScroller : NSControl @end  @implementation NSScroller @end
+@interface NSScrollView : NSView @end   @implementation NSScrollView @end
+@interface NSTextView : NSView @end     @implementation NSTextView @end
+@interface NSColor : MSBase @end        @implementation NSColor @end
+@interface NSFont : MSBase @end         @implementation NSFont @end
+@interface NSBezierPath : MSBase @end   @implementation NSBezierPath @end
+__attribute__((visibility("default"), used)) void NSRectFill(CGRect r) { (void)r; }
+/* same values as AppKit's (and UIKit's) keys */
+__attribute__((visibility("default"), used)) NSAttributedStringKey const NSFontAttributeName = @"NSFont";
+__attribute__((visibility("default"), used)) NSAttributedStringKey const NSForegroundColorAttributeName = @"NSColor";
+
 /* ---------------------------------------------------------------- NSWindow / NSWindowController */
 @interface NSWindow : NSResponder
 @property(nonatomic, strong) NSView *contentView; @property(nonatomic, weak) id delegate; @property(nonatomic, weak) id windowController;
@@ -1161,6 +1177,7 @@ void MTLRemoveDeviceObserver(id<NSObject> observer) {}
 
 static NSString *const kBookmarkKey = @"MacShimDataBookmark2";      /* "play from SSD" choice */
 static NSString *const kImportSrcKey = @"MacShimImportSource";       /* folder being imported, to resume */
+static NSString *g_backupNote;   /* iCloud backup exclusion result, logged once the log works */
 static NSString *g_root; static NSURL *g_scopedURL; static BOOL g_external, g_hadBookmark;
 
 static BOOL MSLooksLikeGameFolder(NSString *p) {
@@ -1192,6 +1209,16 @@ static NSURL *MSResolveBookmark(void) { return MSResolveBookmarkKey(kBookmarkKey
 static NSString *MSDataRoot(void) {            /* nil => setup screen (import / pick SSD folder) */
     static dispatch_once_t o;
     dispatch_once(&o, ^{
+        /* ~75 GB of game data must never go into the device's iCloud backup; the flag on the folder covers its contents */
+        [NSFileManager.defaultManager createDirectoryAtPath:MSInternalRoot() withIntermediateDirectories:YES attributes:nil error:nil];
+        for (NSString *p in @[ MSInternalRoot(), MSImportRoot() ]) {
+            if (![NSFileManager.defaultManager fileExistsAtPath:p]) continue;   /* never create the import folder: it means "unfinished import" */
+            NSError *err = nil; NSNumber *v = nil; NSURL *u = [NSURL fileURLWithPath:p isDirectory:YES];
+            BOOL ok = [u setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:&err];
+            [u getResourceValue:&v forKey:NSURLIsExcludedFromBackupKey error:nil];
+            /* logged later (address-space line): MSLogf -> MSConfig -> MSDataRoot would deadlock inside this dispatch_once */
+            g_backupNote = [(g_backupNote ?: @"") stringByAppendingFormat:@"%@ = %@%@; ", p.lastPathComponent, v, ok ? @"" : [NSString stringWithFormat:@" (failed: %@)", err]];
+        }
         g_hadBookmark = [NSUserDefaults.standardUserDefaults dataForKey:kBookmarkKey] != nil;
         /* a copy in the app's own Documents (imported, or copied in with the Files app) wins: no drive to drop off the bus */
         if (MSLooksLikeGameFolder(MSInternalRoot())) { g_root = MSInternalRoot(); return; }
@@ -1335,6 +1362,10 @@ static NSString *MSGB(uint64_t b) { return [NSString stringWithFormat:@"%.1f GB"
         return [NSString stringWithFormat:@"Not enough space on this iPhone: the game needs %@ more, only %@ free.", MSGB(total - have), MSGB(freeB)];
     MSLogf(@"import: %lu files, %.1f GB, %.1f GB already there", (unsigned long)rel.count, total / 1e9, have / 1e9);
     [fm createDirectoryAtPath:to withIntermediateDirectories:YES attributes:nil error:nil];
+    {   /* keep the copy out of iCloud backup from the first byte; the flag moves with the folder when it is renamed */
+        NSError *be = nil; BOOL ok = [[NSURL fileURLWithPath:to isDirectory:YES] setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:&be];
+        MSLogf(@"backup: import folder excluded from iCloud backup = %d%@", ok, ok ? @"" : [NSString stringWithFormat:@" (%@)", be]);
+    }
 
     const size_t CH = 8 << 20; char *buf = malloc(CH);
     CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent(), lastUI = 0; uint64_t start = have; NSString *err = nil;
@@ -2266,6 +2297,7 @@ static void MSVAInit(void) {
     g_vaBudgetGB = g_vaTotalGB * share;
     MSLogf(@"address space: %.1f GB reservable, %@", g_vaTotalGB, big ? @"extended (64 GB region): normal pool layout"
            : [NSString stringWithFormat:@"no extended-virtual-addressing: compact pools, %.1f GB for them", g_vaBudgetGB]);
+    MSLogf(@"backup: excluded from iCloud backup: %@", g_backupNote ?: @"(not checked)");
 }
 /* compact cap for a pool the engine asked `asked` bytes for: the engine makes 3 big pools (16/32/64 GB), up to ~8 of
    4 GB and a few of <= 1 GB; the budget is split by weight 4 / 1 / 0.5 */
@@ -4541,6 +4573,7 @@ __attribute__((constructor)) static void MSInit(void) {
             chdir(root.fileSystemRepresentation);
             MSLogf(@"game folder (%@): %@", g_external ? @"external" : @"internal", root);
         } else MSLogf(@"no game folder yet - setup screen will appear when the game starts");
+        MSLogf(@"backup: excluded from iCloud backup at launch: %@", g_backupNote ?: @"(not checked)");
         MSAddMacAPIs();
         MSHookGameWindow();
         [NSApplication sharedApplication];
