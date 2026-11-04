@@ -92,7 +92,9 @@ static void MSMainAsync(dispatch_block_t b) { CFRunLoopPerformBlock(CFRunLoopGet
 /* ---------------------------------------------------------------- screen info (C side uses this) */
 static double g_sw = 1366, g_sh = 1024, g_ss = 2, g_fps = 120;
 static double g_tvAspect;                    /* > 0: a TV was connected at launch, the game gets its shape (TV out) */
-static UIScreen *MSExternalScreen(void) { for (UIScreen *s in UIScreen.screens) if (s != UIScreen.mainScreen) return s; return nil; }
+static UIWindowScene *g_launchScene;   /* the app's scene, once it connects (scene lifecycle) */
+/* iPadOS 26+ windowed apps: the app's own scene can sit on a screen object other than mainScreen - that is no TV */
+static UIScreen *MSExternalScreen(void) { for (UIScreen *s in UIScreen.screens) if (s != UIScreen.mainScreen && s != g_launchScene.screen) return s; return nil; }
 static void MSRefreshScreen(void) {
     MSOnMain(^{
         UIScreen *s = UIScreen.mainScreen; g_sw = s.bounds.size.width; g_sh = s.bounds.size.height; g_ss = s.nativeScale; g_fps = (double)s.maximumFramesPerSecond;
@@ -108,10 +110,33 @@ static void MSRefreshScreen(void) {
 /* the phone's own window scene; with a second screen UIKit adds a scene for it, which must never get the game's
    windows (iOS only sends touches to windows in the app's scene) */
 static UIWindowScene *MSAppScene(void) {
+    if (g_launchScene) return g_launchScene;
     for (UIScene *x in UIApplication.sharedApplication.connectedScenes)
         if ([x isKindOfClass:UIWindowScene.class] && (((UIWindowScene *)x).screen == UIScreen.mainScreen || [x.session.role isEqualToString:UIWindowSceneSessionRoleApplication])) return (UIWindowScene *)x;
     return nil;
 }
+/* Scene lifecycle (Info.plist UIApplicationSceneManifest, required once the game binary carries an iOS 26+ SDK stamp,
+   which iPadOS needs to show it full screen instead of in a scaled compatibility window). UIKit calls
+   didFinishLaunching before the scene exists and windows made then never show, so the app delegates wait
+   (MS_WAIT_FOR_SCENE) and MSSceneDelegate runs their launch once the scene connects. */
+static BOOL MSUsesScenes(void) { return [NSBundle.mainBundle objectForInfoDictionaryKey:@"UIApplicationSceneManifest"] != nil; }
+#define MS_WAIT_FOR_SCENE() do { if (MSUsesScenes() && !g_launchScene) return YES; } while (0)
+static UIWindow *MSNewLaunchWindow(void) { return g_launchScene ? [[UIWindow alloc] initWithWindowScene:g_launchScene] : [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds]; }
+@interface MSSceneDelegate : UIResponder <UIWindowSceneDelegate> @property(nonatomic, strong) UIWindow *window; @end
+@implementation MSSceneDelegate
+- (void)scene:(UIScene *)s willConnectToSession:(UISceneSession *)ss options:(UISceneConnectionOptions *)o {
+    if (g_launchScene || ![s isKindOfClass:UIWindowScene.class]) return;
+    g_launchScene = (UIWindowScene *)s;
+    /* iPadOS grants pointer lock only to a full-screen scene; without it trackpad motion stops at the screen edge */
+    [NSNotificationCenter.defaultCenter addObserverForName:UIPointerLockStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
+        UIPointerLockState *st = n.userInfo[UIPointerLockStateSceneUserInfoKey] ? ((UIScene *)n.userInfo[UIPointerLockStateSceneUserInfoKey]).pointerLockState : g_launchScene.pointerLockState;
+        MSLogf(@"pointer lock (iPadOS): %@", st.isLocked ? @"granted" : @"not granted");
+    }];
+    UIApplication *app = UIApplication.sharedApplication; id<UIApplicationDelegate> d = app.delegate;
+    [d application:app didFinishLaunchingWithOptions:@{}];
+    if ([d respondsToSelector:@selector(window)]) self.window = d.window;
+}
+@end
 void MacShimScreenInfo(double *w, double *h, double *s, double *f) {
     static dispatch_once_t once; dispatch_once(&once, ^{ MSRefreshScreen(); });
     if (w) *w = g_sw; if (h) *h = g_sh; if (s) *s = g_ss; if (f) *f = g_fps;
@@ -396,12 +421,14 @@ static _Atomic int g_gcmCount;                   /* GameController mice connecte
 @end
 void MacShimLogC(const char *what, const char *detail) { MSLogf(@"%s: %s", what, detail); }   /* for MacShimC.c */
 void MacShimSetPointerLocked(int locked) {
-    if ((locked != 0) != g_pointerLocked) { static int n; if (n++ < 20) MSLogf(@"pointer %@", locked ? @"locked (gameplay)" : @"unlocked"); }
+    if ((locked != 0) != g_pointerLocked) { static int n; if (n++ < 20) MSLogf(@"pointer %@ (iPadOS lock now %@)", locked ? @"locked (gameplay)" : @"unlocked",
+        g_launchScene ? (g_launchScene.pointerLockState.isLocked ? @"granted" : @"not granted") : @"n/a"); }
     g_pointerLocked = locked != 0;
     MSMainAsync(^{
         for (id w in [(NSApplication *)NSApp windows]) {
             UIWindow *uw = [w valueForKey:@"uiWindow"]; [uw.rootViewController setNeedsUpdateOfPrefersPointerLocked];
         }
+        for (UIWindow *uw in g_launchScene.windows) [uw.rootViewController setNeedsUpdateOfPrefersPointerLocked];   /* pad + status windows too */
     });
 }
 
@@ -701,6 +728,10 @@ static void MSLeftPress(int by, BOOL down) {
     MSLogf(@"window makeKeyAndOrderFront");
     _isVisible = YES; MSOnMain(^{
         if (!self->_uiWindow.windowScene) self->_uiWindow.windowScene = MSAppScene();
+        /* iPadOS 26+ can report stale/portrait sizes to scene apps (Warcraft3.iOS); log them to catch that */
+        UIWindowScene *ws = self->_uiWindow.windowScene;
+        MSLogf(@"layout: window %@, scene %@, screen %@, orientation %ld", NSStringFromCGRect(self->_uiWindow.frame),
+               ws ? NSStringFromCGRect(ws.coordinateSpace.bounds) : @"none", NSStringFromCGRect(UIScreen.mainScreen.bounds), ws ? (long)ws.interfaceOrientation : -1L);
         [self->_uiWindow makeKeyAndVisible];
         g_gameWin = self; MSTVObserve(); MSTVRoute();
     });
@@ -1016,6 +1047,7 @@ static BOOL MSCalledFromGameMain(void *ret);
 
 @implementation MSUIDelegate
 - (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)opts {
+    MS_WAIT_FOR_SCENE();
     MSLogf(@"UIKit launched; calling the game's applicationDidFinishLaunching");
     NSApplication *a = [NSApplication sharedApplication];
     NSNotification *n = [NSNotification notificationWithName:@"NSApplicationDidFinishLaunchingNotification" object:a];
@@ -1384,7 +1416,8 @@ static NSString *MSGB(uint64_t b) { return [NSString stringWithFormat:@"%.1f GB"
 @interface MSSetupDelegate : UIResponder <UIApplicationDelegate> @property(nonatomic, strong) UIWindow *window; @end
 @implementation MSSetupDelegate
 - (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)o {
-    self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds]; self.window.rootViewController = [MSSetupVC new]; [self.window makeKeyAndVisible]; return YES;
+    MS_WAIT_FOR_SCENE();
+    self.window = MSNewLaunchWindow(); self.window.rootViewController = [MSSetupVC new]; [self.window makeKeyAndVisible]; return YES;
 }
 @end
 static void MSRunSetup(void) {                  /* replaces the game's startup; the user reopens the app afterwards */
@@ -1885,10 +1918,11 @@ static void MSWatchGameSettings(void) {
 @interface MSBootDelegate : MSUIDelegate @end
 @implementation MSBootDelegate
 - (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)opts {
+    MS_WAIT_FOR_SCENE();
     MSLogf(@"UIKit launched before the game (boot)");
     [NSNotificationCenter.defaultCenter addObserverForName:UIScreenDidConnectNotification object:nil queue:nil usingBlock:^(NSNotification *x) {
         [NSNotificationCenter.defaultCenter postNotificationName:NSApplicationDidChangeScreenParametersNotification object:NSApp]; }];
-    self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    self.window = MSNewLaunchWindow();
     MSLauncherVC *lv = nil;
     __block void (^playAction)(void) = nil;            /* set below, once `go` exists */
     /* the SwiftUI start screen (Launcher.swift); the UIKit one stays as a fallback */
@@ -3613,6 +3647,7 @@ typedef enum { MSCtlButton, MSCtlToggle } MSCtlKind;
 @interface MSPadVC : UIViewController @end
 @implementation MSPadVC
 - (BOOL)prefersStatusBarHidden { return YES; }
+- (BOOL)prefersPointerLocked { return g_pointerLocked || g_gcmCount > 0; }   /* same as MSRootVC: whichever window iPadOS asks */
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
@@ -3948,7 +3983,7 @@ static void MSStatusCreate(void) {                    /* main thread, before the
     if (!sc) for (UIWindow *w in UIApplication.sharedApplication.windows) if (w.windowScene) { sc = w.windowScene; break; }
     g_statusWin = sc ? [[UIWindow alloc] initWithWindowScene:sc] : [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     g_statusWin.windowLevel = UIWindowLevelAlert + 5; g_statusWin.userInteractionEnabled = NO;
-    g_statusWin.backgroundColor = UIColor.clearColor; g_statusWin.rootViewController = [UIViewController new];
+    g_statusWin.backgroundColor = UIColor.clearColor; g_statusWin.rootViewController = [MSPadVC new];
     g_statusWin.rootViewController.view.backgroundColor = UIColor.clearColor;
     CALayer *root = g_statusWin.rootViewController.view.layer; g_stRoot = root;
     UIEdgeInsets si = (sc.windows.firstObject ?: UIApplication.sharedApplication.windows.firstObject).safeAreaInsets;
