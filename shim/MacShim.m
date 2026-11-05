@@ -4636,6 +4636,12 @@ __attribute__((constructor)) static void MSInit(void) {
         MSLogf(@"memory: %.0f MB in use, %.0f MB left before the system limit", MSFootprintMB(), os_proc_available_memory() / 1048576.0);
         [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidReceiveMemoryWarningNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
             MSLogf(@"memory: WARNING from iOS at %.0f MB in use, %.0f MB left", MSFootprintMB(), os_proc_available_memory() / 1048576.0);
+            /* quick save (the game's F5 binding) so a jetsam kill loses little; the game ignores it in combat, dialogue and menus */
+            static double lastSave; double now = CACurrentMediaTime();
+            if (g_frames < 60 || now - lastSave < 300) return;
+            lastSave = now; MSLogf(@"memory: quick save (F5)");
+            MSKey(GCKeyCodeF5, YES);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ MSKey(GCKeyCodeF5, NO); });
         }];
         MSAddMacAPIs();
         MSHookGameWindow();
