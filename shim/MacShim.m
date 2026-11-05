@@ -18,6 +18,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/message.h>
 #include <os/lock.h>
+#include <os/proc.h>
 #include <stdatomic.h>
 #include <crt_externs.h>
 #include <mach-o/dyld.h>
@@ -4128,8 +4129,8 @@ static void MSStartReadProgress(void) {
             if (tick % 10 == 9) {
                 mbps = (b - b5) / 5.0 / 1048576.0;
                 if (b != b5 || quiet++ % 6 == 0)
-                    MSLogf(@"progress: %.0f s, %.2f GB read in %lld reads, %.1f MB/s, last read %.0f s ago, CPU %.0f%%, memory %.0f MB, %lld frames, %.0f FPS, mouse gate %d, main queue lag %.1f s, thermal %s, yields %lld/s (%lld slept)%@",
-                           now - t0, b / 1073741824.0, c, mbps, idle, cpuPct, mem, fr, fps, MSMouseGate(), g_mqAsked > g_mqBeat ? now - g_mqAsked : 0.0, MSThermal(), MSYieldRate(0), MSYieldRate(1),
+                    MSLogf(@"progress: %.0f s, %.2f GB read in %lld reads, %.1f MB/s, last read %.0f s ago, CPU %.0f%%, memory %.0f MB (%.0f MB left), %lld frames, %.0f FPS, mouse gate %d, main queue lag %.1f s, thermal %s, yields %lld/s (%lld slept)%@",
+                           now - t0, b / 1073741824.0, c, mbps, idle, cpuPct, mem, os_proc_available_memory() / 1048576.0, fr, fps, MSMouseGate(), g_mqAsked > g_mqBeat ? now - g_mqAsked : 0.0, MSThermal(), MSYieldRate(0), MSYieldRate(1),
                            NSProcessInfo.processInfo.lowPowerModeEnabled ? @", LOW POWER MODE" : @"");
                 static int diag = -1; if (diag < 0) diag = [MSConfig()[@"Diagnostics"] boolValue];
                 if (tick % 60 == 29 && fr > 300) { NSString *g = MSGPUSample(); if (g) MSLogf(@"%@", g); }
@@ -4632,6 +4633,10 @@ __attribute__((constructor)) static void MSInit(void) {
             MSLogf(@"game folder (%@): %@", g_external ? @"external" : @"internal", root);
         } else MSLogf(@"no game folder yet - setup screen will appear when the game starts");
         MSLogf(@"backup: excluded from iCloud backup at launch: %@", g_backupNote ?: @"(not checked)");
+        MSLogf(@"memory: %.0f MB in use, %.0f MB left before the system limit", MSFootprintMB(), os_proc_available_memory() / 1048576.0);
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidReceiveMemoryWarningNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
+            MSLogf(@"memory: WARNING from iOS at %.0f MB in use, %.0f MB left", MSFootprintMB(), os_proc_available_memory() / 1048576.0);
+        }];
         MSAddMacAPIs();
         MSHookGameWindow();
         [NSApplication sharedApplication];
