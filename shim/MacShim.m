@@ -1312,7 +1312,7 @@ static NSString *MSGB(uint64_t b) { return [NSString stringWithFormat:@"%.1f GB"
     [_storeBtn setTitle:@"Download from Steam, GOG or Epic…" forState:UIControlStateNormal];
     [_storeBtn addTarget:self action:@selector(storeTapped) forControlEvents:UIControlEventTouchUpInside];
     _storeBtn.hidden = NSClassFromString(@"MSStoreUI") == nil;
-    UIStackView *st = [[UIStackView alloc] initWithArrangedSubviews:@[ title, _info, _storeBtn, _importBtn, _bar, _status ]];   /* no "play from SSD": import only */
+    UIStackView *st = [[UIStackView alloc] initWithArrangedSubviews:@[ title, _info, _storeBtn, _importBtn, _ssdBtn, _bar, _status ]];
     st.axis = UILayoutConstraintAxisVertical; st.spacing = 20; st.translatesAutoresizingMaskIntoConstraints = NO; [self.view addSubview:st];
     [NSLayoutConstraint activateConstraints:@[
         [st.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor], [st.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
